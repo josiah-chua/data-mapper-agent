@@ -1,0 +1,15 @@
+langchain==0.3.20
+langchain-core==0.3.41
+langchain-community==0.3.19
+langchain-openai==0.3.7
+langgraph==0.3.5
+
+# DB Imports
+SQLAlchemy==2.0.38
+sqlite-utils==3.38
+
+# General imports
+python-dotenv==1.0.1
+pydantic==2.10.6
+Faker==36.2.2
+streamlit==1.43.0
