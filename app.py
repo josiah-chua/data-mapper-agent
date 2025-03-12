@@ -58,13 +58,6 @@ class State(TypedDict):
     # (in this case, it appends messages to the list, rather than overwriting them)
     messages: Annotated[list, add_messages]  # basically passes the history through
 
-# Human feedback tool
-class HumanFeedback(BaseModel):
-    """Ask the human a question"""
-    name: str = 'AskHuman'
-    description: str = 'Get users feed back to check for final approval of the output'
-    question: str
-
 # Define LLM instances
 @st.cache_resource
 def load_llm():
@@ -124,20 +117,21 @@ def initialize_tools(_databases, _llm):
     return all_tools
 
 # System message
-SYSTEM_MESSAGE = """You are a data mapping assistant proficient with SQL whose job is to use the 2 databases shop and finance that you are connected to, to match fields with the list of fields in a dataset.
-There are 4 main tasks:
-1. Match fields, find all possible matches from both databases and give a confidence rating of low medium high based on how confident you are that that database table field maps to the given field.
-2. Always ask the user for feedback after being done with the mapping using the feedback tool.
-3. Generate the SQL query to give you the final data table
-4. Ensure that if columns are joint from different databases/tables match the same field, convert them same format for example, categories of countries might be (US, EU...) in one but in another it is (America, Europe ...) and numerical value are in the same precision/units.
+SYSTEM_MESSAGE = """You are a data mapping assistant profficient with SQL whose job is to use the 2 databases shop and finance that you are connected to, to match fields with the list of fields in a dataset.
+There are 2 main tasks:
+1. Match fields, find all possible matches from both data bases and give a confidence rating of low medium high based on how confident you are that that database table field maps to the given field.
+2. Generate the SQL query to give you the final data table
+Make sure to enforce these rules:
+1. Do not hallucinate, only use infromation available from the tools or user
+2. Ensure that if columns are joint from different databases/tables match the same field, convert them same format for example, categories of countries might be (US, EU...) in one but in another it is (America, Europe ...) and numerical value are in the same precision/units.
 
-Do not hallucinate and make sure to ask for feedback after each step. If you are not sure about a match, ask the user for feedback.
+Return the list of matching fields, and the sql query as the final outputs.
 """
 
 # Create agent
 def create_agent(llm, tools):
     # Create bound LLM with tools
-    agent_llm = llm.bind_tools(tools + [HumanFeedback])
+    agent_llm = llm.bind_tools(tools)
     
     sys_msg = SystemMessage(content=SYSTEM_MESSAGE)
     
@@ -169,28 +163,6 @@ def create_agent(llm, tools):
                 )
             return {"messages": outputs}
     
-    def ask_human(state):
-        if messages := state.get("messages", []):
-            message = messages[-1]
-        else:
-            raise ValueError("No message found in input")
-        
-        # In Streamlit, we need to save this state and wait for user input
-        if hasattr(message, "tool_calls") and len(message.tool_calls) > 0:
-            tool_call = message.tool_calls[0]
-            if tool_call["name"] == "AskHuman":
-                st.session_state.waiting_for_feedback = True
-                st.session_state.current_tool_call_id = tool_call["id"]
-                st.session_state.current_message = message
-                # Return empty messages since we'll handle feedback in main()
-                return {"messages": []}
-        
-        # This is a fallback, normally shouldn't get here in Streamlit
-        return {"messages": [ToolMessage(
-            content="User feedback will be collected through the interface",
-            name="AskHuman",
-            tool_call_id=message.tool_calls[0]["id"] if hasattr(message, "tool_calls") and len(message.tool_calls) > 0 else "unknown"
-        )]}
     
     db_tools_node = DBToolsNode(tools=tools)
     
@@ -206,8 +178,6 @@ def create_agent(llm, tools):
         else:
             raise ValueError(f"No messages found in input state to tool_edge: {state}")
         if hasattr(ai_message, "tool_calls") and len(ai_message.tool_calls) > 0:
-            if ai_message.tool_calls[0]["name"] == "AskHuman":
-                return "ask_human"
             return "db_tools"
         return END
     
@@ -215,9 +185,7 @@ def create_agent(llm, tools):
     graph_builder = StateGraph(State)
     graph_builder.add_node("chatbot", chatbot)
     graph_builder.add_node("db_tools", db_tools_node)
-    graph_builder.add_node("ask_human", ask_human)
     graph_builder.add_conditional_edges("chatbot", route_tools)
-    graph_builder.add_edge("ask_human", "chatbot")
     graph_builder.add_edge("db_tools", "chatbot")
     graph_builder.add_edge(START, "chatbot")
     
@@ -465,7 +433,8 @@ def main():
         
         with st.spinner("Thinking..."):
             # Run the agent
-            result = agent.invoke(input_state)
+            for result in agent.stream(input_state, stream_mode="values"):
+                result["messages"][-1].pretty_print()
             
             # Display response
             final_message = result["messages"][-1]
@@ -473,30 +442,9 @@ def main():
             # Add to session state messages
             st.session_state.messages += result["messages"]
             
-            # Check if we need to ask for feedback
-            if hasattr(final_message, "tool_calls") and len(final_message.tool_calls) > 0:
-                if final_message.tool_calls[0]["name"] == "AskHuman":
-                    # Save state for feedback
-                    st.session_state.waiting_for_feedback = True
-                    st.session_state.current_tool_call_id = final_message.tool_calls[0]["id"]
-                    st.session_state.current_message = final_message
-                    
-                    # Show message
-                    with st.chat_message("assistant"):
-                        st.markdown(final_message.content)
-                    
-                    st.session_state.chat_history.append({"role": "assistant", "content": final_message.content})
-                    st.rerun()  # This is fine as it's not in a callback
-                else:
-                    # Regular tool call handling
-                    with st.chat_message("assistant"):
-                        st.markdown(final_message.content)
-                    st.session_state.chat_history.append({"role": "assistant", "content": final_message.content})
-            else:
-                # Handle regular message
-                with st.chat_message("assistant"):
-                    st.markdown(final_message.content)
-                st.session_state.chat_history.append({"role": "assistant", "content": final_message.content})
+            with st.chat_message("assistant"):
+                st.markdown(final_message.content)
+            st.session_state.chat_history.append({"role": "assistant", "content": final_message.content})
 
 # Initialize rerun_needed flag if it doesn't exist
 if "rerun_needed" not in st.session_state:
