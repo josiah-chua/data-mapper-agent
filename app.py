@@ -35,6 +35,14 @@ st.set_page_config(
     layout="wide"
 )
 
+# Initialize session state for app navigation
+if "page" not in st.session_state:
+    st.session_state.page = "landing"
+
+# Initialize session state for database selection
+if "selected_databases" not in st.session_state:
+    st.session_state.selected_databases = {}
+
 # Initialize session state for chat history
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -75,7 +83,7 @@ def load_llm():
 
 # Initialize databases - Make this more dynamic
 @st.cache_resource
-def load_databases():
+def load_all_databases():
     """Dynamically load all available SQLite databases in the current directory"""
     databases = {}
     # Find all SQLite database files in the current directory
@@ -92,8 +100,28 @@ def load_databases():
     
     return databases
 
+# Function to clear database cache
+def refresh_databases():
+    """Clear the database cache to force reloading of all databases"""
+    # Clear the load_all_databases cache
+    load_all_databases.clear()
+    # Set flag to force page refresh
+    st.session_state.rerun_needed = True
+
+# Function to load only selected databases
+def get_selected_databases(all_dbs):
+    """Return only the databases selected by the user"""
+    if not st.session_state.selected_databases:
+        return {}
+        
+    selected_dbs = {}
+    for db_name, selected in st.session_state.selected_databases.items():
+        if selected and db_name in all_dbs:
+            selected_dbs[db_name] = all_dbs[db_name]
+    
+    return selected_dbs
+
 # Initialize tools - update to handle dynamic database loading
-@st.cache_resource
 def initialize_tools(_databases, _llm):
     """Initialize SQL tools for all available databases"""
     all_tools = []
@@ -116,24 +144,28 @@ def initialize_tools(_databases, _llm):
     
     return all_tools
 
-# System message
-SYSTEM_MESSAGE = """You are a data mapping assistant profficient with SQL whose job is to use the 2 databases shop and finance that you are connected to, to match fields with the list of fields in a dataset.
+# System message creator function
+def create_system_message(databases):
+    # Get list of database names
+    db_list = ", ".join(databases.keys()) if databases else "(no databases available)"
+    
+    return SystemMessage(content=f"""You are a data mapping assistant proficient with SQL whose job is to use the databases {db_list} that you are connected to, to match fields with the list of fields in a dataset.
 There are 2 main tasks:
-1. Match fields, find all possible matches from both data bases and give a confidence rating of low medium high based on how confident you are that that database table field maps to the given field.
+1. Match fields, find all possible matches from both databases and give a confidence rating of low, medium, or high based on how confident you are that that database table field maps to the given field.
 2. Generate the SQL query to give you the final data table
 Make sure to enforce these rules:
-1. Do not hallucinate, only use infromation available from the tools or user
-2. Ensure that if columns are joint from different databases/tables match the same field, convert them same format for example, categories of countries might be (US, EU...) in one but in another it is (America, Europe ...) and numerical value are in the same precision/units.
+1. Do not hallucinate, only use information available from the tools or user
+2. Ensure that if columns are joint from different databases/tables match the same field, convert them to the same format; for example, categories of countries might be (US, EU...) in one but in another it is (America, Europe ...) and numerical values are in the same precision/units.
 
-Return the list of matching fields, and the sql query as the final outputs.
-"""
+Return the list of matching fields, and the SQL query as the final outputs.
+""")
 
 # Create agent
-def create_agent(llm, tools):
+def create_agent(llm, tools, databases):
     # Create bound LLM with tools
     agent_llm = llm.bind_tools(tools)
     
-    sys_msg = SystemMessage(content=SYSTEM_MESSAGE)
+    sys_msg = create_system_message(databases)
     
     # Define agent nodes
     def chatbot(state: State):
@@ -214,6 +246,7 @@ def save_session(session_name=None):
         "waiting_for_feedback": st.session_state.waiting_for_feedback,
         "current_tool_call_id": st.session_state.current_tool_call_id,
         "current_message": st.session_state.current_message,
+        "selected_databases": st.session_state.selected_databases,  # Save selected databases
     }
     
     # Save to file
@@ -236,6 +269,12 @@ def load_session(session_name):
         st.session_state.current_tool_call_id = session_data["current_tool_call_id"]
         st.session_state.current_message = session_data["current_message"]
         
+        # Handle selected_databases - compatible with older session files that might not have this
+        if "selected_databases" in session_data:
+            st.session_state.selected_databases = session_data["selected_databases"]
+        # Set flag to force page refresh
+        st.session_state.rerun_needed = True
+        
         return True
     except Exception as e:
         st.error(f"Error loading session: {str(e)}")
@@ -252,24 +291,135 @@ def clear_session():
     st.session_state.waiting_for_feedback = False
     st.session_state.current_tool_call_id = None
     st.session_state.current_message = None
+    # Don't clear selected databases as they might want to start a new conversation with same DBs
+    
     # Add a flag to indicate that a rerun is needed
     st.session_state.rerun_needed = True
 
-# Main function to run the Streamlit app
-def main():
-    # Handle rerun needed flag if it exists
-    if 'rerun_needed' in st.session_state and st.session_state.rerun_needed:
-        st.session_state.rerun_needed = False  # Reset the flag
-        st.rerun()  # This rerun is outside of callback
+# Navigation functions
+def go_to_chat_page():
+    # Check if any databases are selected
+    if not any(st.session_state.selected_databases.values()):
+        st.error("Please select at least one database before proceeding to chat.")
+        return
+    
+    st.session_state.page = "chat"
+    st.session_state.rerun_needed = True
 
+def go_to_landing_page():
+    st.session_state.page = "landing"
+    st.session_state.rerun_needed = True
+
+# Landing page function
+def landing_page():
+    st.title("Data Mapping Assistant - Database Selection")
+    
+    # Add refresh databases button
+    col1, col2, col3 = st.columns([6, 2, 2])
+    with col1:
+        st.subheader("Select Databases")
+    with col3:
+        refresh_db_button = st.button("🔄 Refresh Databases", key="refresh_db_button")
+        if refresh_db_button:
+            refresh_databases()
+    
+    # Get all available databases
+    all_databases = load_all_databases()
+    
+    if not all_databases:
+        st.warning("No databases were found. Please make sure SQLite (.db) files are in the current directory.")
+        return
+    
+    st.write("Choose which databases you want to use for the data mapping task:")
+    
+    # Initialize selected_databases with existing databases if not already set
+    # Clean up stale entries in selected_databases
+    keys_to_remove = [key for key in st.session_state.selected_databases if key not in all_databases]
+    for key in keys_to_remove:
+        del st.session_state.selected_databases[key]
+    
+    # Add new databases with default False selection
+    for db_name in all_databases.keys():
+        if db_name not in st.session_state.selected_databases:
+            st.session_state.selected_databases[db_name] = False
+    
+    # Display database selection with additional info
+    cols = st.columns(2)
+    db_list = list(all_databases.keys())
+    
+    for i, db_name in enumerate(db_list):
+        col_idx = i % 2
+        with cols[col_idx]:
+            try:
+                db = all_databases[db_name]
+                tables = db.get_usable_table_names()
+                table_count = len(tables)
+                table_info = f"{table_count} tables"
+                
+                # Display checkbox with db info
+                st.session_state.selected_databases[db_name] = st.checkbox(
+                    f"{db_name.capitalize()} ({table_info})", 
+                    value=st.session_state.selected_databases.get(db_name, False),
+                    key=f"db_select_{db_name}"
+                )
+                
+                # Show table details in an expander
+                with st.expander(f"View {db_name} tables"):
+                    st.write(", ".join(tables))
+            except Exception as e:
+                st.error(f"{db_name.capitalize()}: Error loading database ({str(e)})")
+    
+    # Session management in landing page
+    st.divider()
+    st.subheader("Session Management")
+    
+    # Load session section
+    available_sessions = get_available_sessions()
+    if available_sessions:
+        st.write("Load an existing session:")
+        col1, col2 = st.columns([7, 3])
+        with col1:
+            selected_session = st.selectbox(
+                "Select session", 
+                available_sessions, 
+                key="load_session_select_landing",
+                label_visibility="collapsed"
+            )
+        with col2:
+            if st.button("📂 Load Session", key="load_button_landing"):
+                if load_session(selected_session):
+                    st.success(f"Session loaded: {selected_session}")
+                    # If the loaded session had database selections, we should keep those
+                    st.session_state.rerun_needed = True
+    else:
+        st.info("No saved sessions available")
+    
+    # Continue to chat button
+    st.divider()
+    proceed_col1, proceed_col2 = st.columns([4, 1])
+    with proceed_col2:
+        st.button("Continue to Chat ➡️", on_click=go_to_chat_page, type="primary")
+
+# Chat page function
+def chat_page():
     # App header using native Streamlit components
     st.title("Data Mapping Agent", anchor=False)
     
     # Initialize components
     llm = load_llm()
     
-    # Load databases dynamically
-    databases = load_databases()
+    # Load all databases first
+    all_databases = load_all_databases()
+    
+    # Then filter to only selected ones
+    databases = get_selected_databases(all_databases)
+    
+    if not databases:
+        st.error("No databases are selected. Please return to the database selection page.")
+        st.button("⬅️ Return to Database Selection", on_click=go_to_landing_page)
+        return
+    
+    # Initialize tools with selected databases
     db_tools = initialize_tools(databases, llm)
     
     # Create a card-like container for the intro section using native components
@@ -280,18 +430,15 @@ def main():
         
         # Dynamically get database information - more efficient approach
         with st.expander("**Available Databases**", expanded=True):
-            if not databases:
-                st.warning("No databases were found. Please make sure SQLite (.db) files are in the current directory.")
-            else:
-                # Display each database information
-                for db_name, db in databases.items():
-                    try:
-                        tables = db.get_usable_table_names()
-                        table_count = len(tables)
-                        table_list = ", ".join(tables[:3]) + ("..." if table_count > 3 else "")
-                        st.write(f"**{db_name.capitalize()} DB**: {table_count} tables ({table_list})")
-                    except Exception as e:
-                        st.error(f"**{db_name.capitalize()} DB**: Unable to fetch tables ({str(e)})")
+            # Display each selected database information
+            for db_name, db in databases.items():
+                try:
+                    tables = db.get_usable_table_names()
+                    table_count = len(tables)
+                    table_list = ", ".join(tables[:3]) + ("..." if table_count > 3 else "")
+                    st.write(f"**{db_name.capitalize()} DB**: {table_count} tables ({table_list})")
+                except Exception as e:
+                    st.error(f"**{db_name.capitalize()} DB**: Unable to fetch tables ({str(e)})")
     
     # Add a visual separator
     st.divider()
@@ -315,10 +462,20 @@ def main():
                     st.markdown(f"**{message['name']}**: {message['content']}")
     
     # Create agent after UI components
-    agent = create_agent(llm, db_tools)
+    agent = create_agent(llm, db_tools, databases)
     
     # Session management in sidebar
     st.sidebar.header("Session Management")
+    
+    # Add the database change button to the sidebar at the top level
+    change_db_col1, change_db_col2 = st.sidebar.columns([2, 2])
+    with change_db_col1:
+        st.button("⬅️ Change Databases", on_click=go_to_landing_page, key="change_db_sidebar")
+    with change_db_col2:
+        st.button("🔄 Refresh DBs", on_click=refresh_databases, key="refresh_db_sidebar")
+    
+    # Add a separator in the sidebar
+    st.sidebar.divider()
     
     # Save session - improved layout
     with st.sidebar.container():
@@ -334,34 +491,12 @@ def main():
             saved_name = save_session(session_name)
             st.sidebar.success(f"Session saved as: {saved_name}")
 
-    # Load session - improved layout
-    available_sessions = get_available_sessions()
-    if available_sessions:
-        with st.sidebar.container():
-            col1, col2 = st.columns([7, 3])
-            with col1:
-                selected_session = st.selectbox("Load session", 
-                                            available_sessions, 
-                                            key="load_session_select")
-            with col2:
-                st.write("")  # Add some spacing for alignment
-                load_button = st.button("📂 Load", key="load_button")
-            
-            if load_button:
-                if load_session(selected_session):
-                    st.sidebar.success(f"Session loaded: {selected_session}")
-                    st.session_state.rerun_needed = True
-                    st.rerun()  # This is fine as it's not in a callback
-    else:
-        st.sidebar.info("No saved sessions available")
-    
     # Clear session - Make it more compact
     with st.sidebar.container():
-        if st.button("🗑️ Clear Session", key="clear_session_button", help="Delete current conversation"):
+        if st.button("🗑️ Clear Chat", key="clear_session_button", help="Delete current conversation"):
             clear_session()  # This sets rerun_needed flag
-            st.sidebar.success("Session cleared")
-            st.rerun()  # This is fine as it's not in a callback
-
+            st.sidebar.success("Chat cleared")
+    
     # Instructions as expandable section in sidebar
     with st.sidebar.expander("📋 Instructions", expanded=False):
         st.markdown("""
@@ -449,6 +584,19 @@ def main():
 # Initialize rerun_needed flag if it doesn't exist
 if "rerun_needed" not in st.session_state:
     st.session_state.rerun_needed = False
+
+# Main app entry point
+def main():
+    # Handle rerun needed flag if it exists
+    if 'rerun_needed' in st.session_state and st.session_state.rerun_needed:
+        st.session_state.rerun_needed = False  # Reset the flag
+        st.rerun()  # This rerun is outside of callback
+
+    # Route to the appropriate page
+    if st.session_state.page == "landing":
+        landing_page()
+    else:  # chat page
+        chat_page()
 
 if __name__ == "__main__":
     main()
