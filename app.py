@@ -59,6 +59,10 @@ if "current_tool_call_id" not in st.session_state:
 if "current_message" not in st.session_state:
     st.session_state.current_message = None
 
+# Initialize the explanation level setting with default of "full"
+if "explanation_level" not in st.session_state:
+    st.session_state.explanation_level = "full"
+
 # Define state for LangGraph
 class State(TypedDict):
     # Messages have the type "list". The `add_messages` function
@@ -149,7 +153,52 @@ def create_system_message(databases):
     # Get list of database names
     db_list = ", ".join(databases.keys()) if databases else "(no databases available)"
     
-    return SystemMessage(content=f"""You are a data mapping assistant proficient with SQL. You are connected to the following databases {db_list}.
+    # Get the current explanation level
+    explanation_level = st.session_state.explanation_level
+    
+    if explanation_level == "none":
+        return SystemMessage(content=f"""You are a data mapping assistant proficient with SQL. You are connected to the following databases {db_list}.
+Based on the user's question, suggest columns from the various tables from the databases that you are connected.
+
+When suggesting columns you need to fulfill these tasks:
+1. Columns: Return only the columns needed for the task and the database they are from. DO NOT return columns that are not used in the final query
+2. Join Columns: Return the common join columns to get the table only if needed
+3. Generate the SQL queries only if needed to get the final table. Ensure that if columns are from tables in different databases provided the necessary syntax.
+
+***Important***
+Do not hallucinate, only use information retrieved from the SQL databases. If you cannot answer the query just say you cannot.
+Only execute the SQL query if all the data is from the same database and if explicitly instructed by the user.
+
+Deliverables: Columns, Join Columns, Queries
+
+Return the output in this format:
+...
+""")
+
+    elif explanation_level == "low":
+        return SystemMessage(content=f"""You are a data mapping assistant proficient with SQL. You are connected to the following databases {db_list}.
+Based on the user's question, suggest columns from the various tables from the databases that you are connected.
+
+When suggesting columns you need to fulfill these tasks:
+1. Columns: Return only the columns needed for the task and the database they are from. DO NOT return columns that are not used in the final query
+2. Join Columns: Return the common join columns to get the table only if needed
+3. Briefly analyze the matching columns for compatibility
+4. Give a simple confidence score (High, Medium, Low)
+5. Generate the SQL queries only if needed to get the final table. Ensure that if columns are from tables in different databases provided the necessary syntax.
+6. Brief explanation on why this query is appropriate
+
+***Important***
+Do not hallucinate, only use information retrieved from the SQL databases. If you cannot answer the query just say you cannot.
+Only execute the SQL query if all the data is from the same database and if explicitly instructed by the user.
+
+Deliverables: Columns, Join Columns, Confidence score, Queries with brief explanation
+
+Return the output in this format:
+...
+""")
+
+    else:  # "full" explanation level (default)
+        return SystemMessage(content=f"""You are a data mapping assistant proficient with SQL. You are connected to the following databases {db_list}.
 Based on the user's question, suggest columns form the various tables from the databses that you are connected.
 
 When suggesting columns you need fufill these tasks:
@@ -374,6 +423,7 @@ def save_session(session_name=None):
         "current_tool_call_id": st.session_state.current_tool_call_id,
         "current_message": st.session_state.current_message,
         "selected_databases": st.session_state.selected_databases,  # Save selected databases
+        "explanation_level": st.session_state.explanation_level,   # Save explanation level preference
     }
     
     # Save to file
@@ -399,6 +449,10 @@ def load_session(session_name):
         # Handle selected_databases - compatible with older session files that might not have this
         if "selected_databases" in session_data:
             st.session_state.selected_databases = session_data["selected_databases"]
+            
+        # Handle explanation_level - compatible with older session files that might not have this
+        if "explanation_level" in session_data:
+            st.session_state.explanation_level = session_data["explanation_level"]
         # Set flag to force page refresh
         st.session_state.rerun_needed = True
         
@@ -496,6 +550,31 @@ def landing_page():
                     st.write(", ".join(tables))
             except Exception as e:
                 st.error(f"{db_name.capitalize()}: Error loading database ({str(e)})")
+    
+    # Add explanation level selector to the landing page
+    st.divider()
+    st.subheader("Response Detail Level")
+    
+    # Create helpful descriptions for each explanation level
+    explanation_options = {
+        "none": "No Explanation - Just columns and queries",
+        "low": "Brief Explanation - Basic confidence scores and brief rationale",
+        "full": "Full Explanation - Detailed analysis with comprehensive explanations"
+    }
+    
+    # Use selectbox for explanation level with the current value pre-selected
+    selected_level = st.selectbox(
+        "Choose how detailed you want the assistant's responses to be:",
+        options=list(explanation_options.keys()),
+        format_func=lambda x: explanation_options[x],
+        index=list(explanation_options.keys()).index(st.session_state.explanation_level),
+        key="explanation_level_landing"
+    )
+    
+    # Update the session state if the user changes the explanation level
+    if selected_level != st.session_state.explanation_level:
+        st.session_state.explanation_level = selected_level
+        st.success(f"Response detail level set to: {explanation_options[selected_level]}")
     
     # Session management in landing page
     st.divider()
@@ -601,6 +680,16 @@ def chat_page():
         st.button("⬅️ Change Databases", on_click=go_to_landing_page, key="change_db_sidebar")
     with change_db_col2:
         st.button("🔄 Refresh DBs", on_click=refresh_databases, key="refresh_db_sidebar")
+    
+    # Display current explanation level (for reference only)
+    st.sidebar.divider()
+    explanation_labels = {
+        "none": "No Explanation",
+        "low": "Brief Explanation",
+        "full": "Full Explanation"
+    }
+    st.sidebar.info(f"Response detail level: **{explanation_labels[st.session_state.explanation_level]}**\n\n"
+                    f"To change this setting, return to the database selection page.")
     
     # Add a separator in the sidebar
     st.sidebar.divider()
